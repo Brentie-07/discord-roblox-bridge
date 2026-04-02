@@ -9,6 +9,7 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const SECRET_KEY = process.env.SECRET_KEY;
 
 const messageQueue = [];
+const playerLists = {};
 
 function checkSecret(req, res) {
   if (req.headers["x-secret"] !== SECRET_KEY) {
@@ -18,7 +19,7 @@ function checkSecret(req, res) {
   return true;
 }
 
-// Roblox polls this for Discord messages
+// Roblox polls this for commands
 app.get("/poll", (req, res) => {
   if (!checkSecret(req, res)) return;
   const messages = [...messageQueue];
@@ -26,26 +27,28 @@ app.get("/poll", (req, res) => {
   res.json({ messages });
 });
 
-// Roblox sends player chat here
-app.post("/roblox-to-discord", (req, res) => {
+// Roblox sends join/leave events here
+app.post("/roblox-event", (req, res) => {
   if (!checkSecret(req, res)) return;
-  const { username, content, serverId } = req.body;
-  if (!username || !content) {
+  const { type, username, serverId } = req.body;
+  if (!type || !username) {
     return res.status(400).json({ error: "Missing fields" });
   }
   const channel = discordClient.channels.cache.get(CHANNEL_ID);
   if (channel) {
-    // Include the server ID in the message
-    channel.send(`🎮 **${username}** [Server: \`${serverId || "unknown"}\`]: ${content}`);
+    if (type === "join") {
+      channel.send(`✅ **${username}** joined the game [Server: \`${serverId || "unknown"}\`]`);
+    } else if (type === "leave") {
+      channel.send(`👋 **${username}** left the game [Server: \`${serverId || "unknown"}\`]`);
+    }
   }
   res.json({ ok: true });
 });
 
-// Roblox sends player list here (for !players command)
+// Roblox sends player list here
 app.post("/update-players", (req, res) => {
   if (!checkSecret(req, res)) return;
   const { players, serverId } = req.body;
-  // Store latest player list per server
   playerLists[serverId] = players || [];
   res.json({ ok: true });
 });
@@ -54,9 +57,6 @@ app.post("/update-players", (req, res) => {
 app.get("/ping", (req, res) => {
   res.send("pong");
 });
-
-// Store player lists per server
-const playerLists = {};
 
 // ---- DISCORD BOT ----
 const discordClient = new Client({
@@ -77,28 +77,25 @@ discordClient.on("messageCreate", (msg) => {
 
   const content = msg.content.trim();
 
-  // ---- COMMANDS ----
-
-  // !shutdown — tells Roblox to shut down all servers
-  if (content === "!shutdown") {
-    messageQueue.push({ type: "command", command: "shutdown" });
-    msg.reply("⚠️ Shutdown command sent to Roblox!");
-    return;
-  }
-
-  // !announce [message] — broadcasts a message in Roblox chat
+  // !announce [message] — shows a chat message to all players
   if (content.startsWith("!announce ")) {
-    const announcement = content.slice("!announce ".length).trim();
-    if (!announcement) {
-      msg.reply("Usage: `!announce your message here`");
-      return;
-    }
-    messageQueue.push({ type: "command", command: "announce", text: announcement });
-    msg.reply(`📢 Announced in Roblox: "${announcement}"`);
+    const text = content.slice("!announce ".length).trim();
+    if (!text) { msg.reply("Usage: `!announce your message here`"); return; }
+    messageQueue.push({ type: "announce", text });
+    msg.reply(`📢 Announced in game: "${text}"`);
     return;
   }
 
-  // !players — shows all players currently in game
+  // !news [message] — shows a pop-up notification to all players
+  if (content.startsWith("!news ")) {
+    const text = content.slice("!news ".length).trim();
+    if (!text) { msg.reply("Usage: `!news your update here`"); return; }
+    messageQueue.push({ type: "news", text });
+    msg.reply(`📰 News sent to game: "${text}"`);
+    return;
+  }
+
+  // !players — lists all players grouped by server
   if (content === "!players") {
     const allServers = Object.entries(playerLists);
     if (allServers.length === 0) {
@@ -106,24 +103,32 @@ discordClient.on("messageCreate", (msg) => {
       return;
     }
     let reply = "**Players currently in game:**\n";
+    let total = 0;
     for (const [serverId, players] of allServers) {
       reply += `\n🖥️ Server \`${serverId}\`:\n`;
       if (players.length === 0) {
         reply += "  *(empty)*\n";
       } else {
         reply += players.map(p => `  • ${p}`).join("\n") + "\n";
+        total += players.length;
       }
     }
+    reply += `\n**Total: ${total} player(s)**`;
     msg.reply(reply);
     return;
   }
 
-  // Regular chat message — queue it for Roblox
-  messageQueue.push({
-    type: "chat",
-    username: msg.author.username,
-    content: msg.content,
-  });
+  // !restart — restarts all servers
+  if (content === "!restart") {
+    messageQueue.push({ type: "restart" });
+    msg.reply("🔄 Restart command sent to all servers!");
+    return;
+  }
+
+  // Unknown command
+  if (content.startsWith("!")) {
+    msg.reply("❓ Unknown command. Available commands: `!announce`, `!news`, `!players`, `!restart`");
+  }
 });
 
 discordClient.login(BOT_TOKEN);
